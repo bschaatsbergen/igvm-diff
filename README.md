@@ -16,8 +16,6 @@ Try the test fixtures, which differ in one 4 KiB page:
 cargo run -- diff tests/fixtures/before.igvm tests/fixtures/after.igvm
 ```
 
-Three [COCONUT-SVSM images](tests/fixtures/coconut-svsm/README.md) from community COPR builds are also included.
-
 `compare` is an alias for `diff`. Exit codes are `0` for identical files, `1` for differences, and `2` for invalid or unsupported input. Errors go to stderr.
 
 ## What it compares
@@ -27,8 +25,6 @@ Three [COCONUT-SVSM images](tests/fixtures/coconut-svsm/README.md) from communit
 - Parameter areas, parameter directives, insertions, and memory requirements.
 - SNP/SEV-ES VMSA and native/SEV CPU state payloads. SNP reports also show changes to selected registers, including RIP, CR3, EFER, and VMPL.
 - SNP ID blocks and VBS measurement records.
-
-CPU feature explanations are backed by [specification references](docs/mappings.md).
 
 ## Current scope
 

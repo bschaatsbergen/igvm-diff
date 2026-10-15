@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "retrieved_on": "2026-10-15",
+  "repository": "https://github.com/microsoft/openvmm",
+  "commit": "6feb6f0e4f5d3cb7ea5a6657afb24c51f50bfa10",
+  "run_url": "https://github.com/microsoft/openvmm/actions/runs/38639549342",
+  "files": [
+    {
+      "file": "38639549342/x64-openhcl-igvm/openhcl-x64.bin",
+      "artifact": "x64-openhcl-igvm",
+      "artifact_id": 11928944769,
+      "archive_digest": "sha256:fe8e9d602e7115b1fc3e94943ca04d4b89727aba9c192d250c2c2b26d6dfeff6",
+      "sha256": "6cfe8e166cf2bed4a059dd92f2e04c7038d3b25215d2cd52e2800ea2e44a66c8",
+      "size": 20336116,
+      "format_version": 1,
+      "record_count": 6626
+    },
+    {
+      "file": "38639549342/x64-openhcl-igvm-cvm/openhcl-x64-cvm.bin",
+      "artifact": "x64-openhcl-igvm-cvm",
+      "artifact_id": 11929674225,
+      "archive_digest": "sha256:605de017bd9fd0a16de434ed93b4883062c4ee1d9bf7d99c1c0de15c25a178ff",
+      "sha256": "d82c8d0d73b1289997152241a0d4715d7286b127a6e92030b7e43138afdbb62d",
+      "size": 21879500,
+      "format_version": 1,
+      "record_count": 26015
+    }
+  ]
+}

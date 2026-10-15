@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "retrieved_on": "2026-10-15",
+  "files": [
+    {
+      "file": "coconut-fedora-9065337.igvm",
+      "distribution": "Fedora 42",
+      "copr_build": "9065337",
+      "source_url": "https://copr-be.cloud.fedoraproject.org/results/@virtmaint-sig/sev-snp-coconut/fedora-42-x86_64/09065337-coconut-svsm/coconut-svsm-202505019-3.fc42.x86_64.rpm",
+      "spec_url": "https://copr-be.cloud.fedoraproject.org/results/@virtmaint-sig/sev-snp-coconut/fedora-42-x86_64/09065337-coconut-svsm/coconut-svsm.spec",
+      "archive_member": "./usr/share/coconut-svsm/coconut-qemu.igvm",
+      "archive_sha256": "b6acbe31838de41e7a73a4574815d32e731000603f3648baaef6a4f7ed39ebb4",
+      "sha256": "1886afacb3abdd2ffe717b41197b17da05386970cb5e6d5767714cf005668e92",
+      "size": 3584688,
+      "format_version": 2,
+      "record_count": 1176
+    },
+    {
+      "file": "coconut-centos-9705530.igvm",
+      "distribution": "CentOS Stream 10",
+      "copr_build": "9705530",
+      "source_url": "https://copr-be.cloud.fedoraproject.org/results/osteffen/coconut-svsm-centos/centos-stream-10-x86_64/09705530-coconut-svsm/coconut-svsm-2025.09.devel-0.el10.osteffen202510200634.x86_64.rpm",
+      "spec_url": "https://copr-be.cloud.fedoraproject.org/results/osteffen/coconut-svsm-centos/centos-stream-10-x86_64/09705530-coconut-svsm/coconut-svsm.spec",
+      "archive_member": "./usr/share/coconut-svsm/coconut-qemu.igvm",
+      "archive_sha256": "027cf4bc0e24211a2b563a0815e5421692ca03831574e382ab32ab2400bae6b4",
+      "sha256": "0e6bceb702e9d3a63749ac89c2e208623b3af7f715edec21e8ae706c53e7755d",
+      "size": 5400560,
+      "format_version": 2,
+      "record_count": 2114
+    },
+    {
+      "file": "coconut-fedora-10828816.igvm",
+      "distribution": "Fedora 44",
+      "copr_build": "10828816",
+      "source_url": "https://copr-be.cloud.fedoraproject.org/results/@virtmaint-sig/sev-snp-coconut/fedora-44-x86_64/10828816-coconut-svsm/coconut-svsm-v2026.07.devel-1.fc44.x86_64.rpm",
+      "spec_url": "https://copr-be.cloud.fedoraproject.org/results/@virtmaint-sig/sev-snp-coconut/fedora-44-x86_64/10828816-coconut-svsm/coconut-svsm.spec",
+      "archive_member": "./usr/share/coconut-svsm/coconut-qemu.igvm",
+      "archive_sha256": "818cca4e85fc06fc0b40651f4be3683f1f40720702dd9de69eb6aca55f4aedaf",
+      "sha256": "54c802dcffdb80d86f6f2e1d73d9db679db249384d33655227906b962356e6c8",
+      "size": 4624688,
+      "format_version": 2,
+      "record_count": 1933
+    }
+  ]
+}

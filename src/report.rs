@@ -189,7 +189,9 @@ pub(crate) fn compare(before: Image, after: Image) -> Report {
     });
     let file_bytes_changed = before.artifact.sha256 != after.artifact.sha256;
     let format_changed = before.artifact.format_version != after.artifact.format_version;
-    if file_bytes_changed && findings.is_empty() && !format_changed {
+    if before.unreferenced_sha256 != after.unreferenced_sha256 {
+        diagnostics.push("Changes to unreferenced data are outside the records and payloads compared by this report. Review the file layout and build output.".into());
+    } else if file_bytes_changed && findings.is_empty() && !format_changed {
         diagnostics.push("File bytes differ without supported record changes. File offsets, padding, or unreferenced data may differ; this does not establish semantic equivalence.".into());
     }
     Report {

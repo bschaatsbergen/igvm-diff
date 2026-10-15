@@ -103,6 +103,49 @@ fn vmsa(platform: u8, fields: &[(usize, usize, u64)]) -> Vec<u8> {
     )
 }
 
+fn vbs(registers: &[(u8, u32, u64)]) -> Header {
+    let mut data = vec![0; 4 + registers.len() * 32];
+    put(&mut data, 0, 4, registers.len() as u64);
+    for (i, &(vtl, name, value)) in registers.iter().enumerate() {
+        let start = 4 + i * 32;
+        put(&mut data, start, 1, vtl.into());
+        put(&mut data, start + 1, 4, name.into());
+        put(&mut data, start + 16, 8, value);
+    }
+    Header::new(0x304, 20, &[(8, 4, 1)]).data(12, data)
+}
+
+fn relocation() -> Header {
+    Header::new(
+        0x102,
+        48,
+        &[
+            (0, 4, 1),
+            (6, 1, 2),
+            (7, 1, 7),
+            (8, 8, 0x1000),
+            (16, 8, 0x20_0000),
+            (24, 8, 0x3000),
+            (32, 8, 0x10_0000),
+            (40, 8, 0x1000_0000),
+        ],
+    )
+}
+
+fn page_table_relocation() -> Header {
+    Header::new(
+        0x103,
+        32,
+        &[
+            (0, 4, 1),
+            (6, 1, 2),
+            (8, 8, 0x1000),
+            (16, 8, 4096),
+            (24, 8, 4096),
+        ],
+    )
+}
+
 fn added(platform: u8, headers: Vec<Header>) -> Report {
     diff(&image(platform, vec![]), &image(platform, headers)).unwrap()
 }
@@ -123,6 +166,248 @@ fn hash(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[test]
+fn unsupported_metadata_is_named_and_never_skipped() {
+    let supported = image(2, vec![]);
+    for (typ, size, name) in [
+        (0x106, 24, "CCA policy"),
+        (0x107, 8, "version string"),
+        (0x8000_0400, 8, "unknown record"),
+    ] {
+        let unsupported = image(2, vec![Header::new(typ, size, &[])]);
+        for (a, b) in [
+            (&supported, &unsupported),
+            (&unsupported, &supported),
+            (&unsupported, &unsupported),
+        ] {
+            let error = diff(a, b).unwrap_err().to_string();
+            assert!(error.contains(name), "{error}");
+            assert!(error.contains(&format!("{typ:#x}")), "{error}");
+        }
+    }
+}
+
+#[test]
+fn vbs_register_values_and_omissions_are_compared_without_amd_annotations() {
+    for (name, code) in [
+        ("rip", 0x20010),
+        ("rsp", 0x20004),
+        ("rflags", 0x20011),
+        ("cr0", 0x40000),
+        ("cr3", 0x40002),
+        ("cr4", 0x40003),
+        ("efer", 0x80001),
+        ("pat", 0x80004),
+    ] {
+        let make = |value| image(1, vec![vbs(&[(2, code, value)])]);
+        let before = make(0);
+        let after = make(0x1234_5678_9abc_def0);
+        for (a, b, expected) in [
+            (&before, &after, "0x123456789abcdef0"),
+            (&after, &before, "0x0"),
+        ] {
+            let report = diff(a, b).unwrap();
+            assert_eq!(report.findings.len(), 1);
+            let change = &report.findings[0];
+            assert_eq!(change.kind, ChangeKind::Modified);
+            let r = change.after.as_ref().unwrap();
+            assert_eq!(r.identity, "0/vtl2");
+            assert_eq!(r.fields[name], expected);
+            assert_eq!(r.fields["vtl"], 2);
+            let mut fields = vec![name, "payload_sha256"];
+            fields.sort();
+            assert_eq!(change.fields, fields);
+            assert!(!report.to_string().contains("References:"));
+        }
+    }
+    let before = image(1, vec![vbs(&[(2, 0x20010, 0x1000)])]);
+    let after = image(1, vec![vbs(&[(2, 0x20010, 0x1000), (2, 0x40002, 0x2000)])]);
+    for (a, b) in [(&before, &after), (&after, &before)] {
+        let report = diff(a, b).unwrap();
+        assert_eq!(
+            report.findings[0].fields,
+            ["cr3", "payload_sha256", "register_count"]
+        );
+        assert!(report.to_string().contains("not specified"));
+    }
+}
+
+#[test]
+fn vbs_contexts_at_different_vtls_are_not_paired_together() {
+    let make = |rip| {
+        image(
+            1,
+            vec![vbs(&[(0, 0x20010, 0x1000)]), vbs(&[(2, 0x20010, rip)])],
+        )
+    };
+    let report = diff(&make(0x2000), &make(0x3000)).unwrap();
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(
+        report.findings[0].after.as_ref().unwrap().identity,
+        "0/vtl2"
+    );
+    assert_eq!(report.findings[0].fields, ["payload_sha256", "rip"]);
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn vbs_context_hash_covers_undisplayed_registers_and_all_value_bytes() {
+    let before = image(1, vec![vbs(&[(2, 0x20005, 0)])]);
+    for byte in 0..16 {
+        let mut context = vbs(&[(2, 0x20005, 0)]);
+        context.data.as_mut().unwrap().1[4 + 16 + byte] = 1;
+        let report = diff(&before, &image(1, vec![context])).unwrap();
+        assert_eq!(report.findings[0].fields, ["payload_sha256"]);
+    }
+}
+
+#[test]
+fn malformed_vbs_contexts_fail_before_upstream_assertions() {
+    let mut cases = vec![
+        vbs(&[]),
+        vbs(&[(2, 0x20010, 0), (1, 0x40002, 0)]),
+        vbs(&[(3, 0x20010, 0)]),
+        vbs(&[(2, 0x20010, 0), (2, 0x20010, 1)]),
+        vbs(&[(2, u32::MAX, 0)]),
+    ];
+    for (offset, width, value) in [(0, 4, u32::MAX as u64), (0, 4, 257), (4 + 5, 1, 1)] {
+        let mut context = vbs(&[(2, 0x20010, 0)]);
+        put(&mut context.data.as_mut().unwrap().1, offset, width, value);
+        cases.push(context);
+    }
+    let mut secondary = vbs(&[(2, 0x20010, 0)]);
+    put(&mut secondary.body, 16, 2, 1);
+    cases.push(secondary);
+    for offset in [0, 1, u32::MAX] {
+        let mut context = vbs(&[(2, 0x20010, 0)]);
+        context.data = None;
+        put(&mut context.body, 12, 4, offset.into());
+        cases.push(context);
+    }
+    let valid = image(1, vec![vbs(&[(2, 0x20010, 0)])]);
+    for (i, context) in cases.into_iter().enumerate() {
+        let invalid = image(1, vec![context]);
+        for (a, b) in [(&valid, &invalid), (&invalid, &valid)] {
+            assert!(diff(a, b).is_err(), "case {i}");
+        }
+    }
+}
+
+#[test]
+fn relocation_fields_keep_their_units_flags_and_vtl() {
+    let report = added(
+        1,
+        vec![
+            relocation(),
+            page_table_relocation(),
+            vbs(&[(2, 0x20010, 0x20_0000), (2, 0x40002, 0x1000)]),
+        ],
+    );
+    let r = record(&report, "relocatable_region");
+    assert_eq!(
+        r.fields,
+        json!({
+            "gpa": "0x200000", "size": 0x3000, "alignment": 0x1000,
+            "minimum_gpa": "0x100000", "maximum_gpa": "0x10000000",
+            "vp_index": 0, "vtl": 2, "is_vtl2": true, "apply_rip_offset": true, "apply_gdtr_offset": true
+        })
+    );
+    let r = record(&report, "page_table_relocation");
+    assert_eq!(
+        r.fields,
+        json!({"gpa": "0x1000", "size": 4096, "used_size": 4096, "vp_index": 0, "vtl": 2})
+    );
+    assert_eq!(r.identity, "0/vtl2");
+}
+
+#[test]
+fn invalid_relocation_bounds_and_flags_never_reach_upstream_arithmetic() {
+    for (offset, width, value) in [
+        (8, 8, 0),
+        (8, 8, 1),
+        (24, 8, 0),
+        (24, 8, u64::MAX - 4095),
+        (16, 8, u64::MAX - 4095),
+        (32, 8, 0x2000_0000),
+        (40, 8, u64::MAX - 4095),
+        (7, 1, 8),
+        (6, 1, 3),
+    ] {
+        let mut region = relocation();
+        put(&mut region.body, offset, width, value);
+        let bytes = image(1, vec![region, vbs(&[(2, 0x20010, 0)])]);
+        assert!(diff(&bytes, &bytes).is_err(), "relocation offset {offset}");
+    }
+    for (offset, width, value) in [
+        (16, 8, 0),
+        (8, 8, u64::MAX - 4095),
+        (24, 8, 8192),
+        (7, 1, 1),
+        (6, 1, 3),
+    ] {
+        let mut region = page_table_relocation();
+        put(&mut region.body, offset, width, value);
+        let bytes = image(1, vec![region, vbs(&[(2, 0x40002, 0x1000)])]);
+        assert!(diff(&bytes, &bytes).is_err(), "page-table offset {offset}");
+    }
+}
+
+#[test]
+fn corim_documents_and_signatures_are_compared_as_opaque_bytes() {
+    let make = |document, signature| {
+        image(
+            2,
+            vec![
+                Header::new(0x104, 16, &[(0, 4, 1), (8, 4, 3)]).data(4, vec![0xa1, 0, document]),
+                Header::new(0x105, 16, &[(0, 4, 1), (8, 4, 2)]).data(4, vec![0x81, signature]),
+            ],
+        )
+    };
+    let before = make(1, 1);
+    for (after, kind, size, payload) in [
+        (make(2, 1), "corim_document", 3, vec![0xa1, 0, 2]),
+        (make(1, 2), "corim_signature", 2, vec![0x81, 2]),
+    ] {
+        let report = diff(&before, &after).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        let change = &report.findings[0];
+        assert_eq!(change.fields, ["payload_sha256"]);
+        let r = change.after.as_ref().unwrap();
+        assert_eq!(r.kind, kind);
+        assert_eq!(
+            r.fields,
+            json!({"size": size, "payload_sha256": hash(&payload)})
+        );
+        assert!(report.to_string().contains("identity/measurement metadata"));
+        assert_eq!(report.measurement, "not_requested");
+        assert!(report.diagnostics.is_empty());
+    }
+}
+
+#[test]
+fn corim_payload_offsets_sizes_and_reserved_fields_are_checked() {
+    for typ in [0x104, 0x105] {
+        for fields in [
+            vec![(4, 4, 0)],
+            vec![(4, 4, 1)],
+            vec![(4, 4, u32::MAX as u64)],
+            vec![(8, 4, u32::MAX as u64)],
+            vec![(8, 4, 0)],
+            vec![(12, 4, 1)],
+        ] {
+            let mut metadata = Header::new(typ, 16, &[(0, 4, 1), (8, 4, 1)]).data(4, vec![0xa0]);
+            for (offset, width, value) in fields {
+                if offset == 4 {
+                    metadata.data = None;
+                }
+                put(&mut metadata.body, offset, width, value);
+            }
+            let bytes = image(2, vec![metadata]);
+            assert!(diff(&bytes, &bytes).is_err());
+        }
+    }
 }
 
 #[test]
@@ -302,12 +587,15 @@ fn context_layout_is_selected_by_platform() {
         );
         assert!(!report.to_string().contains("EFER:"));
     }
-    for (platform, name) in [(1, "vbs"), (3, "tdx")] {
+    for (platform, name) in [
+        (1, "VBS VP contexts for secondary processors"),
+        (3, "tdx VP context"),
+    ] {
         let error = diff(&vmsa(platform, &[]), &image(platform, vec![]))
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains(&format!("unsupported IGVM: {name} VP context")),
+            error.contains(&format!("unsupported IGVM: {name}")),
             "{error}"
         );
     }

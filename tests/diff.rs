@@ -207,6 +207,54 @@ fn platform_masks_are_resolved_by_platform_meaning() {
 }
 
 #[test]
+fn mixed_platform_images_keep_platform_specific_changes_separate() {
+    let make = |snp_byte, shared_mask| {
+        let mut snp = page(0x1000, snp_byte);
+        let mut tdx = page(0x1000, 2);
+        let mut shared = page(0x2000, 3);
+        for (record, mask) in [(&mut snp, 1), (&mut tdx, 2), (&mut shared, shared_mask)] {
+            let D::PageData {
+                compatibility_mask, ..
+            } = record
+            else {
+                unreachable!()
+            };
+            *compatibility_mask = mask;
+        }
+        image(
+            IgvmRevision::V2 {
+                arch: Arch::X64,
+                page_size: 4096,
+            },
+            vec![
+                platform(1, IgvmPlatformType::SEV_SNP),
+                platform(2, IgvmPlatformType::TDX),
+                platform(4, IgvmPlatformType::VSM_ISOLATION),
+            ],
+            vec![],
+            vec![snp, tdx, shared],
+        )
+    };
+    let report = diff(&make(1, 7), &make(4, 3)).unwrap();
+    assert_eq!(report.findings.len(), 3);
+    let changed = &report.findings[0];
+    assert_eq!(changed.kind, ChangeKind::Modified);
+    assert_eq!(changed.after.as_ref().unwrap().platforms, ["sev-snp"]);
+    assert_eq!(changed.fields, ["payload_sha256"]);
+    let removed = &report.findings[1];
+    assert_eq!(removed.kind, ChangeKind::Removed);
+    assert_eq!(
+        removed.before.as_ref().unwrap().platforms,
+        ["sev-snp", "tdx", "vbs"]
+    );
+    let added = &report.findings[2];
+    assert_eq!(added.kind, ChangeKind::Added);
+    assert_eq!(added.after.as_ref().unwrap().platforms, ["sev-snp", "tdx"]);
+    assert!(report.diagnostics.is_empty());
+    assert!(report.to_string().contains("platform coverage"));
+}
+
+#[test]
 fn snp_registers_and_other_vmsa_bytes_are_compared() {
     let context = |rip, reserved| {
         let mut vmsa = SevVmsa::new_box_zeroed().unwrap();
@@ -359,6 +407,81 @@ fn unreferenced_bytes_are_not_declared_equivalent() {
 }
 
 #[test]
+fn record_changes_do_not_hide_changes_to_unreferenced_data() {
+    let mut before = fixture(vec![page(0x1000, 1)]);
+    let mut after = fixture(vec![page(0x1000, 2)]);
+    for (bytes, tail) in [(&mut before, 41), (&mut after, 42)] {
+        bytes.push(tail);
+        let size = bytes.len() as u32;
+        bytes[16..20].copy_from_slice(&size.to_le_bytes());
+        checksum(bytes);
+    }
+    for (a, b) in [(&before, &after), (&after, &before)] {
+        let report = diff(a, b).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].fields, ["payload_sha256"]);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("unreferenced data"))
+        );
+        assert!(
+            report
+                .to_string()
+                .contains("Some differences could not be matched or explained.")
+        );
+        assert!(
+            !report
+                .to_string()
+                .contains("Contents changed in 1 memory page")
+        );
+    }
+}
+
+#[test]
+fn header_gaps_are_checked_even_when_page_contents_change() {
+    let mut before = fixture(vec![page(0x1000, 1)]);
+    before.splice(24..24, [9; 8]);
+    before[8..12].copy_from_slice(&32_u32.to_le_bytes());
+    let body = body_offset(&before, IgvmVariableHeaderType::IGVM_VHT_PAGE_DATA);
+    let offset = u32::from_le_bytes(before[body + 12..body + 16].try_into().unwrap()) + 8;
+    before[body + 12..body + 16].copy_from_slice(&offset.to_le_bytes());
+    let size = before.len() as u32;
+    before[16..20].copy_from_slice(&size.to_le_bytes());
+    checksum(&mut before);
+    let mut after = before.clone();
+    after[24] ^= 1;
+    *after.last_mut().unwrap() ^= 1;
+    let report = diff(&before, &after).unwrap();
+    assert_eq!(report.findings.len(), 1);
+    assert!(report.diagnostics[0].contains("unreferenced data"));
+}
+
+#[test]
+fn aliased_and_overlapping_payloads_do_not_create_spurious_diagnostics() {
+    let before = fixture(vec![page(0x1000, 1), page(0x2000, 1)]);
+    let mut after = before.clone();
+    let first = body_offset(&after, IgvmVariableHeaderType::IGVM_VHT_PAGE_DATA);
+    let second = first + 32;
+    let offset = u32::from_le_bytes(after[first + 12..first + 16].try_into().unwrap());
+    assert_eq!(&after[second + 12..second + 16], &offset.to_le_bytes());
+    after[second + 16..second + 20].copy_from_slice(&2_u32.to_le_bytes());
+    checksum(&mut after);
+    assert!(diff(&before, &after).unwrap().diagnostics.is_empty());
+
+    after[second + 12..second + 16].copy_from_slice(&(offset + 1).to_le_bytes());
+    after.push(1);
+    let size = after.len() as u32;
+    after[16..20].copy_from_slice(&size.to_le_bytes());
+    checksum(&mut after);
+    let report = diff(&before, &after).unwrap();
+    assert!(report.diagnostics.is_empty(), "{report:#}");
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].fields, ["unmeasured"]);
+}
+
+#[test]
 fn explicit_and_implicit_zero_pages_remain_distinguishable() {
     let before = fixture(vec![page(0x1000, 1), page(0x2000, 0)]);
     let mut zero = page(0x2000, 0);
@@ -400,6 +523,57 @@ fn malformed_inputs_fail_even_when_both_sides_are_identical() {
     }
     for (index, bytes) in cases.iter().enumerate() {
         assert!(diff(bytes, bytes).is_err(), "malformed case {index}");
+    }
+}
+
+#[test]
+fn header_bit_mutations_never_panic_or_disappear_from_the_report() {
+    let seeds = [
+        fixture(vec![page(0x1000, 1)]),
+        fixture(vec![
+            D::ParameterArea {
+                number_of_bytes: 4096,
+                parameter_area_index: 0,
+                initial_data: vec![1; 4096],
+            },
+            D::VpCount(IGVM_VHS_PARAMETER {
+                parameter_area_index: 0,
+                byte_offset: 0,
+            }),
+            D::ParameterInsert(IGVM_VHS_PARAMETER_INSERT {
+                gpa: 0x1000,
+                compatibility_mask: 1,
+                parameter_area_index: 0,
+            }),
+        ]),
+        fixture(vec![D::SnpVpContext {
+            gpa: 0x2000,
+            compatibility_mask: 1,
+            vp_index: 0,
+            vmsa: SevVmsa::new_box_zeroed().unwrap(),
+        }]),
+    ];
+    for (seed, valid) in seeds.iter().enumerate() {
+        let header = IGVM_FIXED_HEADER::read_from_prefix(valid).unwrap().0;
+        let end = (header.variable_header_offset + header.variable_header_size) as usize;
+        for offset in header.variable_header_offset as usize..end {
+            for bit in 0..8 {
+                let mut mutated = valid.clone();
+                mutated[offset] ^= 1 << bit;
+                checksum(&mut mutated);
+                for (before, after) in [(valid, &mutated), (&mutated, valid)] {
+                    let result = std::panic::catch_unwind(|| diff(before, after));
+                    let result = result
+                        .unwrap_or_else(|_| panic!("seed {seed}, offset {offset}, bit {bit}"));
+                    if let Ok(report) = result {
+                        assert!(report.has_changes());
+                        assert!(!report.findings.is_empty() || !report.diagnostics.is_empty());
+                        assert!(!report.to_string().contains("Files are identical"));
+                        serde_json::to_vec(&report).unwrap();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -574,7 +748,7 @@ fn snp_identity_metadata_and_key_material_changes_are_visible() {
 }
 
 #[test]
-fn vbs_context_is_rejected_before_entering_the_upstream_parser() {
+fn mismatched_context_layout_is_rejected_before_entering_the_upstream_parser() {
     let mut bytes = fixture(vec![
         page(0x1000, 1),
         D::SnpVpContext {
@@ -588,7 +762,109 @@ fn vbs_context_is_rejected_before_entering_the_upstream_parser() {
     bytes[platform + 5] = IgvmPlatformType::VSM_ISOLATION.0;
     checksum(&mut bytes);
     let error = diff(&bytes, &bytes).unwrap_err().to_string();
-    assert!(error.contains("unsupported IGVM: vbs VP context"));
+    assert!(error.contains("VBS context requires zero GPA"));
+}
+
+#[test]
+fn vbs_and_relocation_records_are_compared_in_mixed_platform_images() {
+    use igvm::{hv_defs::Vtl, registers::X86Register};
+
+    let cases = [
+        (vec![], "vp_context"),
+        (
+            vec![I::RelocatableRegion {
+                compatibility_mask: 4,
+                relocation_alignment: 0x20_0000,
+                relocation_region_gpa: 0x20_0000,
+                relocation_region_size: 0x20_0000,
+                minimum_relocation_gpa: 0x20_0000,
+                maximum_relocation_gpa: 0x1_0000_0000,
+                is_vtl2: true,
+                apply_rip_offset: true,
+                apply_gdtr_offset: true,
+                vp_index: 0,
+                vtl: Vtl::Vtl2,
+            }],
+            "relocatable_region",
+        ),
+        (
+            vec![I::PageTableRelocationRegion {
+                compatibility_mask: 4,
+                gpa: 0x1000,
+                size: 0x2000,
+                used_size: 0x1000,
+                vp_index: 0,
+                vtl: Vtl::Vtl2,
+            }],
+            "page_table_relocation",
+        ),
+    ];
+    let directory = TempDir::new();
+    let path = directory.0.join("vbs.igvm");
+    let supported = fixture(vec![page(0x1000, 1)]);
+    for (init, feature) in cases {
+        let bytes = image(
+            IgvmRevision::V2 {
+                arch: Arch::X64,
+                page_size: 4096,
+            },
+            [
+                IgvmPlatformType::SEV_SNP,
+                IgvmPlatformType::TDX,
+                IgvmPlatformType::VSM_ISOLATION,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(bit, typ)| {
+                let P::SupportedPlatform(mut info) = platform(1 << bit, typ);
+                info.highest_vtl = 2;
+                P::SupportedPlatform(info)
+            })
+            .collect(),
+            init,
+            vec![
+                page(0x20_0000, 1),
+                D::X64VbsVpContext {
+                    vtl: Vtl::Vtl2,
+                    registers: vec![X86Register::Rip(0x20_0000), X86Register::Cr3(0x1000)],
+                    compatibility_mask: 4,
+                },
+            ],
+        );
+        IgvmFile::new_from_binary(&bytes, None).unwrap();
+        for (a, b) in [(&bytes, &supported), (&supported, &bytes)] {
+            let report = diff(a, b).unwrap();
+            assert!(
+                report.findings.iter().any(|c| c
+                    .before
+                    .iter()
+                    .chain(&c.after)
+                    .any(|r| r.kind == feature))
+            );
+        }
+        fs::write(&path, &bytes).unwrap();
+        for format in ["text", "json"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_igvm-diff"))
+                .arg("diff")
+                .arg(&path)
+                .arg(&path)
+                .args(["--format", format])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(0));
+            assert!(output.stderr.is_empty());
+            if format == "text" {
+                assert!(
+                    String::from_utf8(output.stdout)
+                        .unwrap()
+                        .contains("Files are identical")
+                );
+            } else {
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report["findings"], serde_json::json!([]));
+            }
+        }
+    }
 }
 
 #[test]
@@ -665,20 +941,61 @@ fn public_coconut_images_match_the_manifest_and_can_be_compared() {
         );
         images.push(bytes);
     }
-    for pair in images.windows(2) {
-        let report = diff(&pair[0], &pair[1]).unwrap();
-        assert!(report.has_changes());
-        assert!(
-            report
+    for (a, before) in images.iter().enumerate() {
+        for after in &images[a + 1..] {
+            let report = diff(before, after).unwrap();
+            assert!(report.has_changes());
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|change| change.fields.iter().any(|field| field == "payload_sha256"))
+            );
+            let summary = report.to_string();
+            assert!(summary.lines().count() < 110);
+            assert!(summary.contains("Configuration and CPU changes:"));
+            assert!(summary.contains("more ranges; use --verbose"));
+            assert!(format!("{report:#}").lines().count() > report.findings.len());
+            let reverse = diff(after, before).unwrap();
+            let mut expected: Vec<_> = report
                 .findings
                 .iter()
-                .any(|change| change.fields.iter().any(|field| field == "payload_sha256"))
-        );
-        let summary = report.to_string();
-        assert!(summary.lines().count() < 110);
-        assert!(summary.contains("Configuration and CPU changes:"));
-        assert!(summary.contains("more ranges; use --verbose"));
-        assert!(format!("{report:#}").lines().count() > report.findings.len());
+                .map(|change| {
+                    let kind = match change.kind {
+                        ChangeKind::Added => ChangeKind::Removed,
+                        ChangeKind::Removed => ChangeKind::Added,
+                        kind => kind,
+                    };
+                    serde_json::to_string(&(
+                        kind,
+                        &change.after,
+                        &change.before,
+                        &change.fields,
+                        change.order_changed,
+                    ))
+                    .unwrap()
+                })
+                .collect();
+            let mut actual: Vec<_> = reverse
+                .findings
+                .iter()
+                .map(|change| {
+                    serde_json::to_string(&(
+                        change.kind,
+                        &change.before,
+                        &change.after,
+                        &change.fields,
+                        change.order_changed,
+                    ))
+                    .unwrap()
+                })
+                .collect();
+            expected.sort();
+            actual.sort();
+            assert_eq!(actual, expected);
+            assert_eq!(reverse.diagnostics, report.diagnostics);
+            assert!(report.diagnostics.is_empty(), "{report:#}");
+        }
     }
 }
 
@@ -738,6 +1055,39 @@ fn summary_groups_only_adjacent_pages_with_matching_attributes() {
         assert!(text.contains(&format!("{start:#x}..{end:#x}: 1 page,")));
     }
     assert!(!text.contains("0x1000..0x7000"));
+}
+
+#[test]
+fn page_flags_remain_visible_among_many_mask_reassignments() {
+    let make = |mask, changed| {
+        let pages = (0..20)
+            .map(|i| {
+                let mut p = page(0x1000 + i * 4096, 1);
+                let D::PageData {
+                    compatibility_mask,
+                    flags,
+                    ..
+                } = &mut p
+                else {
+                    unreachable!()
+                };
+                *compatibility_mask = mask;
+                *flags = flags.with_unmeasured(changed && i == 19);
+                p
+            })
+            .collect();
+        image(
+            IgvmRevision::V1,
+            vec![platform(mask, IgvmPlatformType::SEV_SNP)],
+            vec![],
+            pages,
+        )
+    };
+    let report = diff(&make(1, false), &make(2, true)).unwrap();
+    let text = report.to_string();
+    assert!(text.contains("Unmeasured: false -> true"));
+    assert!(text.contains("8 more changes; use --verbose"));
+    assert_eq!(report.findings.len(), 21);
 }
 
 #[test]

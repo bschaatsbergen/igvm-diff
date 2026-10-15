@@ -131,6 +131,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "corim"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18ae0dacf8af1ae85596c375df3bf848ff57712a8b07d5a9ba36863d901f78d7"
+dependencies = [
+ "corim-macros",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "corim-macros"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c16ee2c7db3dde66570487ea3a6329bd07ca138652b57a3a442c200c75df495"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -196,14 +218,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59f77675c910030e49a3e66db299a53982893695a5cc2938d053605fc0923a94"
 dependencies = [
  "bitfield-struct",
+ "corim",
  "crc32fast",
  "hex",
  "igvm_defs",
  "open-enum",
  "range_map_vec",
+ "sha2",
  "static_assertions",
  "thiserror",
  "tracing",
+ "uuid",
  "zerocopy",
 ]
 
@@ -476,6 +501,12 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "uuid"
+version = "1.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 
 [[package]]
 name = "windows-link"

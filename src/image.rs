@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use igvm::{IgvmFile, snp_defs::SevVmsa};
+use igvm::{IgvmFile, registers::X86Register, snp_defs::SevVmsa};
 use igvm_defs::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -14,6 +14,7 @@ const MAX_REFERENCED_BYTES: u64 = 128 * 1024 * 1024;
 pub(crate) struct Image {
     pub artifact: Artifact,
     pub records: Vec<Record>,
+    pub unreferenced_sha256: String,
 }
 
 pub(crate) fn hash(bytes: &[u8]) -> String {
@@ -63,6 +64,7 @@ struct Reader<'a> {
     bytes: &'a [u8],
     data_start: usize,
     referenced_bytes: u64,
+    payload_ranges: Vec<(usize, usize)>,
     platforms: BTreeMap<u32, &'static str>,
     parameters: BTreeMap<u32, u64>,
 }
@@ -87,7 +89,89 @@ impl<'a> Reader<'a> {
         if start < self.data_start {
             return Err(invalid("payload points into the headers"));
         }
+        if start < end {
+            self.payload_ranges.push((start, end));
+        }
         Ok(&self.bytes[start..end])
+    }
+
+    fn unreferenced_hash(&mut self, fixed_size: usize, header_start: usize) -> String {
+        let mut hasher = Sha256::new();
+        let gap = &self.bytes[fixed_size..header_start];
+        hasher.update((gap.len() as u64).to_le_bytes());
+        hasher.update(gap);
+        self.payload_ranges.sort_unstable();
+        let mut cursor = self.data_start;
+        for &(start, end) in &self.payload_ranges {
+            if start > cursor {
+                hasher.update(&self.bytes[cursor..start]);
+            }
+            cursor = cursor.max(end);
+        }
+        hasher.update(&self.bytes[cursor..]);
+        hex(&hasher.finalize())
+    }
+
+    fn vbs_context(&mut self, h: &IGVM_VHS_VP_CONTEXT) -> Result<(String, Value), Error> {
+        if h.vp_index != 0 {
+            return Err(Error::Unsupported(
+                "VBS VP contexts for secondary processors".into(),
+            ));
+        }
+        if h.gpa.get() != 0 || h.file_offset == 0 {
+            return Err(invalid(
+                "VBS context requires zero GPA and a stored payload",
+            ));
+        }
+        let header: VbsVpContextHeader = read(self.payload(h.file_offset, 4)?)?;
+        if header.register_count == 0 {
+            return Err(invalid("VBS context has no registers"));
+        }
+        if header.register_count > 256 {
+            return Err(Error::Limit("more than 256 VBS context registers"));
+        }
+        let offset = h
+            .file_offset
+            .checked_add(4)
+            .ok_or_else(|| invalid("VBS payload offset overflows"))?;
+        let registers = self.payload(offset, u64::from(header.register_count) * 32)?;
+        let data = &self.bytes[h.file_offset as usize..offset as usize + registers.len()];
+        let mut fields = json!({
+            "gpa": "0x0", "vp_index": h.vp_index, "register_count": header.register_count,
+            "payload_sha256": hash(data), "rip": null, "rsp": null,
+            "cr0": null, "cr3": null, "cr4": null, "efer": null, "rflags": null, "pat": null
+        });
+        let mut names = BTreeSet::new();
+        let mut vtl = None;
+        for bytes in registers.as_chunks::<32>().0 {
+            let reg: VbsVpContextRegister = read(bytes)?;
+            reserved(reg.mbz != [0; 11])?;
+            if reg.vtl > 2 || vtl.is_some_and(|v| v != reg.vtl) {
+                return Err(invalid("VBS registers must use one valid VTL"));
+            }
+            vtl = Some(reg.vtl);
+            if !names.insert(reg.register_name.get()) {
+                return Err(invalid("duplicate VBS register"));
+            }
+            let decoded = X86Register::try_from(reg).map_err(|_| {
+                Error::Unsupported(format!("VBS register {:#x}", reg.register_name.get()))
+            })?;
+            let (name, value) = match decoded {
+                X86Register::Rip(v) => ("rip", v),
+                X86Register::Rsp(v) => ("rsp", v),
+                X86Register::Cr0(v) => ("cr0", v),
+                X86Register::Cr3(v) => ("cr3", v),
+                X86Register::Cr4(v) => ("cr4", v),
+                X86Register::Efer(v) => ("efer", v),
+                X86Register::Rflags(v) => ("rflags", v),
+                X86Register::Pat(v) => ("pat", v),
+                _ => continue,
+            };
+            fields[name] = json!(address(value));
+        }
+        let vtl = vtl.expect("nonempty register list");
+        fields["vtl"] = json!(vtl);
+        Ok((format!("{}/vtl{vtl}", h.vp_index), fields))
     }
 
     fn record(
@@ -125,6 +209,62 @@ impl<'a> Reader<'a> {
                     Some(h.compatibility_mask),
                     String::new(),
                     json!({"policy": address(h.policy)}),
+                )
+            }
+            T::IGVM_VHT_RELOCATABLE_REGION => {
+                let h: IGVM_VHS_RELOCATABLE_REGION = read(body)?;
+                reserved(h.flags & !7 != 0)?;
+                if h.relocation_alignment == 0 || h.relocation_region_size == 0 {
+                    return Err(invalid("relocation alignment and size must be nonzero"));
+                }
+                if h.minimum_relocation_gpa > h.maximum_relocation_gpa {
+                    return Err(invalid("relocation minimum exceeds maximum"));
+                }
+                range(h.relocation_region_gpa, h.relocation_region_size)?;
+                range(h.maximum_relocation_gpa, h.relocation_region_size)?;
+                (
+                    "relocatable_region",
+                    Some(h.compatibility_mask),
+                    address(h.relocation_region_gpa),
+                    json!({
+                        "gpa": address(h.relocation_region_gpa), "size": h.relocation_region_size,
+                        "alignment": h.relocation_alignment,
+                        "minimum_gpa": address(h.minimum_relocation_gpa), "maximum_gpa": address(h.maximum_relocation_gpa),
+                        "vp_index": h.vp_index, "vtl": h.vtl, "is_vtl2": h.flags & 1 != 0,
+                        "apply_rip_offset": h.flags & 2 != 0, "apply_gdtr_offset": h.flags & 4 != 0
+                    }),
+                )
+            }
+            T::IGVM_VHT_PAGE_TABLE_RELOCATION_REGION => {
+                let h: IGVM_VHS_PAGE_TABLE_RELOCATION = read(body)?;
+                reserved(h.reserved != 0)?;
+                if h.size == 0 {
+                    return Err(invalid("page-table relocation size must be nonzero"));
+                }
+                range(h.gpa, h.size)?;
+                (
+                    "page_table_relocation",
+                    Some(h.compatibility_mask),
+                    format!("{}/vtl{}", h.vp_index, h.vtl),
+                    json!({"gpa": address(h.gpa), "size": h.size, "used_size": h.used_size, "vp_index": h.vp_index, "vtl": h.vtl}),
+                )
+            }
+            T::IGVM_VHT_CORIM_DOCUMENT | T::IGVM_VHT_CORIM_SIGNATURE => {
+                let h: IGVM_VHS_CORIM_DATA = read(body)?;
+                reserved(h.reserved != 0)?;
+                if h.file_offset == 0 || h.size_bytes == 0 {
+                    return Err(invalid("CoRIM metadata requires a nonempty stored payload"));
+                }
+                let data = self.payload(h.file_offset, h.size_bytes.into())?;
+                (
+                    if typ == T::IGVM_VHT_CORIM_DOCUMENT {
+                        "corim_document"
+                    } else {
+                        "corim_signature"
+                    },
+                    Some(h.compatibility_mask),
+                    String::new(),
+                    json!({"size": h.size_bytes, "payload_sha256": hash(data)}),
                 )
             }
             T::IGVM_VHT_PAGE_DATA => {
@@ -186,8 +326,19 @@ impl<'a> Reader<'a> {
                     .get(&h.compatibility_mask)
                     .copied()
                     .ok_or_else(|| invalid("VP context must reference one defined platform"))?;
-                if !matches!(platform, "sev-snp" | "sev-es" | "native" | "sev") {
+                if !matches!(platform, "sev-snp" | "sev-es" | "native" | "sev" | "vbs") {
                     return Err(Error::Unsupported(format!("{platform} VP context")));
+                }
+                if platform == "vbs" {
+                    let (identity, fields) = self.vbs_context(&h)?;
+                    return Ok(Record {
+                        index,
+                        kind: "vp_context",
+                        platforms: vec![platform.into()],
+                        compatibility_mask: Some(h.compatibility_mask),
+                        identity,
+                        fields,
+                    });
                 }
                 if h.file_offset == 0 {
                     return Err(invalid("VP context has no payload"));
@@ -303,8 +454,13 @@ impl<'a> Reader<'a> {
                     T::IGVM_VHT_COMMAND_LINE => "command_line",
                     T::IGVM_VHT_DEVICE_TREE => "device_tree",
                     _ => {
+                        let name = match typ.0 {
+                            0x106 => "CCA policy",
+                            0x107 => "version string",
+                            _ => "unknown record",
+                        };
                         return Err(Error::Unsupported(format!(
-                            "record type {:#x} at index {index}",
+                            "{name} (record type {:#x} at index {index})",
                             typ.0
                         )));
                     }
@@ -400,6 +556,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Image, Error> {
         bytes,
         data_start: end,
         referenced_bytes: 0,
+        payload_ranges: Vec::new(),
         platforms: BTreeMap::new(),
         parameters: BTreeMap::new(),
     };
@@ -445,5 +602,6 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Image, Error> {
             record_count: records.len(),
         },
         records,
+        unreferenced_sha256: reader.unreferenced_hash(fixed_size, start),
     })
 }

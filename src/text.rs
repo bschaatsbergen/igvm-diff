@@ -42,7 +42,7 @@ pub(crate) fn summary(report: &Report, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         "guest_policy" => 0,
         "vp_context" => 1,
         "supported_platform" => 2,
-        "snp_id_block" | "vbs_measurement" => 3,
+        "snp_id_block" | "vbs_measurement" | "corim_document" | "corim_signature" => 3,
         _ => 4,
     });
     let mut references = Vec::new();
@@ -82,7 +82,7 @@ pub(crate) fn summary(report: &Report, f: &mut fmt::Formatter<'_>) -> fmt::Resul
                 writeln!(f, "  Records involving {flag} pages: {count}")?;
             }
         }
-        let attributes: Vec<_> = pages
+        let mut attributes: Vec<_> = pages
             .iter()
             .copied()
             .filter(|change| {
@@ -92,6 +92,19 @@ pub(crate) fn summary(report: &Report, f: &mut fmt::Formatter<'_>) -> fmt::Resul
                         || masks_changed(change))
             })
             .collect();
+        attributes.sort_by_key(|change| {
+            if change
+                .fields
+                .iter()
+                .any(|field| matches!(field.as_str(), "shared" | "unmeasured" | "data_type"))
+            {
+                0
+            } else if change.fields.iter().any(|field| field == "data_present") {
+                1
+            } else {
+                2
+            }
+        });
         details(f, "Page attribute changes", &attributes, &mut references)?;
         ranges(f, &pages)?;
     }
@@ -163,7 +176,10 @@ fn overview(report: &Report, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             "required_memory" | "error_range" => {
                 areas.insert("memory requirements");
             }
-            "snp_id_block" | "vbs_measurement" => {
+            "relocatable_region" | "page_table_relocation" => {
+                areas.insert("relocation settings");
+            }
+            "snp_id_block" | "vbs_measurement" | "corim_document" | "corim_signature" => {
                 areas.insert("identity/measurement metadata");
             }
             _ => {
@@ -214,6 +230,8 @@ fn overview(report: &Report, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         "review startup configuration and memory layout in the image builder's source/build diff."
     } else if areas.contains("identity/measurement metadata") {
         "verify the changed identity/measurement metadata against your trust policy."
+    } else if areas.contains("relocation settings") {
+        "review allowed load addresses and register/page-table adjustments in the image builder and loader."
     } else if areas.contains("page attributes") {
         "review changes to page sharing, measurement flags and page types."
     } else if areas.contains("page addresses or platform coverage") {
@@ -280,6 +298,16 @@ fn label(name: &str) -> String {
         "parameter_insert" => "Parameter placement".into(),
         "snp_id_block" => "SNP identity block".into(),
         "vbs_measurement" => "VBS measurement".into(),
+        "corim_document" => "CoRIM document".into(),
+        "corim_signature" => "CoRIM signature".into(),
+        "relocatable_region" => "Relocatable region".into(),
+        "page_table_relocation" => "Page-table relocation".into(),
+        "vtl" => "Virtual trust level (VTL)".into(),
+        "is_vtl2" => "VTL2 region".into(),
+        "minimum_gpa" => "Minimum relocation address".into(),
+        "maximum_gpa" => "Maximum relocation address".into(),
+        "apply_rip_offset" => "Adjust RIP on relocation".into(),
+        "apply_gdtr_offset" => "Adjust GDTR on relocation".into(),
         "error_range" => "Host-visible error range".into(),
         "payload_sha256" => "Stored contents".into(),
         "data_present" => "Initial data storage".into(),
@@ -311,6 +339,9 @@ fn label(name: &str) -> String {
 }
 
 fn value(field: &str, value: &Value) -> String {
+    if value.is_null() {
+        return "not specified".into();
+    }
     if field == "data_present" {
         return if value == true {
             "bytes in file"
@@ -319,7 +350,7 @@ fn value(field: &str, value: &Value) -> String {
         }
         .into();
     }
-    if field == "size" {
+    if matches!(field, "size" | "used_size" | "alignment") {
         let bytes = value.as_u64().expect("size is an unsigned integer");
         return if bytes >= 1024 {
             format!("{} ({bytes} bytes)", size(bytes))
@@ -389,6 +420,10 @@ fn details(
                         value(field, &b.fields[field])
                     )?;
                     if record.kind == "vp_context"
+                        && record
+                            .platforms
+                            .iter()
+                            .any(|p| matches!(p.as_str(), "sev-snp" | "sev-es"))
                         && let Some(note) =
                             crate::annotations::explain(field, &a.fields[field], &b.fields[field])
                     {

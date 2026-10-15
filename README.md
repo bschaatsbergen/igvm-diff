@@ -1,8 +1,6 @@
 # igvm-diff
 
-Compare two IGVM files and see what changed in memory pages, boot settings, and CPU startup state. Written in Rust, with a CLI and library.
-
-## Usage
+A Rust CLI and library for comparing IGVM files. It shows changes to memory pages, boot configuration, and initial CPU state between builds.
 
 ```sh
 cargo run -- diff A.igvm B.igvm
@@ -10,33 +8,35 @@ cargo run -- diff A.igvm B.igvm --verbose
 cargo run -- diff A.igvm B.igvm --format json
 ```
 
-The default output summarizes the changes and suggests where to start reviewing. Use `--verbose` for every change and full hashes, or `--format json` for the complete report in JSON.
+Use `--verbose` for every record change and full hashes, or `--format json` for JSON output.
 
-Exit codes: `0` for identical files, `1` for differences, `2` for errors. `compare` is an alias for `diff`.
-
-Try the small test files included in the repository:
+Try the test fixtures, which differ in one 4 KiB page:
 
 ```sh
 cargo run -- diff tests/fixtures/before.igvm tests/fixtures/after.igvm
 ```
 
-There are also three [COCONUT-SVSM images](tests/fixtures/coconut-svsm/README.md) from community COPR builds to compare.
+Three [COCONUT-SVSM images](tests/fixtures/coconut-svsm/README.md) from community COPR builds are also included.
 
-## Reading the report
+`compare` is an alias for `diff`. Exit codes are `0` for identical files, `1` for differences, and `2` for invalid or unsupported input. Errors go to stderr.
 
-`modified` shows changes to an existing record. `added` and `removed` list that record's values. A flag shown as `false` on an added record does not mean it changed from `true`.
+## What it compares
 
-Labels such as `[native, sev-snp, tdx]` show which platforms a record applies to. For an SEV-SNP deployment, look at records that include `sev-snp`.
+- Platform definitions and guest policies, resolving compatibility masks by platform type.
+- Page addresses, types, shared/unmeasured flags, and payload SHA-256 digests.
+- Parameter areas, parameter directives, insertions, and memory requirements.
+- SNP/SEV-ES VMSA and native/SEV CPU state payloads. SNP reports also show changes to selected registers, including RIP, CR3, EFER, and VMPL.
+- SNP ID blocks and VBS measurement records.
 
-Known EFER and SEV feature bits have short explanations and references to the manual. Unknown bits stay visible as hexadecimal values. The [mapping notes](docs/mappings.md) list the fields and their sources.
+CPU feature explanations are backed by [specification references](docs/mappings.md).
 
-Use the report alongside a review of the source and build changes. It does not calculate launch measurements, verify signatures, or decide whether a build is safe to accept.
+## Current scope
 
-## Supported files
+Supports x64 IGVM v1 and v2 with 4 KiB pages, using the `igvm` parser. Relocation records, VBS VP contexts, AArch64/CCA, CoRIM, and 2 MiB pages are not supported. Unknown records and VMSAs with obfuscated registers return an error.
 
-Supports x64 IGVM v1 and v2 with 4 KiB pages, up to 64 MiB per file. Unsupported records and CPU contexts return an error. This includes relocation records, VBS CPU contexts, and VMSAs with obfuscated registers.
+Each input is limited to 64 MiB, 32,768 records, and 128 MiB of referenced or implicit payloads. Comparisons run locally and leave both files unchanged.
 
-For library use, `igvm_diff::diff(&before, &after)` returns the same report as the CLI. Format it with `{report}` for the summary or `{report:#}` for full details.
+The report helps focus a source and build review. It does not calculate launch measurements, verify signatures, or decide whether a build is safe to accept.
 
 ## Development
 

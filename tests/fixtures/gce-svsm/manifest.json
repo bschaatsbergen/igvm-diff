@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "retrieved_on": "2026-11-11",
+  "bucket": "gs://gce_tcb_integrity",
+  "prefix": "ovmf_x64_csm/svsm/",
+  "files": [
+    {
+      "file": "gce-svsm-0932e060.igvm",
+      "object": "ovmf_x64_csm/svsm/0932e060edc03a9ce09630566d281b8c4cf54cceb445bd2f203f2182e15001dc7a5c7e9001d5e0e248f952c047d5175a.igvm",
+      "source_url": "https://storage.googleapis.com/gce_tcb_integrity/ovmf_x64_csm/svsm/0932e060edc03a9ce09630566d281b8c4cf54cceb445bd2f203f2182e15001dc7a5c7e9001d5e0e248f952c047d5175a.igvm",
+      "generation": "1792120040385377",
+      "time_created": "2026-10-16T03:07:20.450Z",
+      "md5_base64": "8EbIig/ZWwVeanb9XmbyHA==",
+      "sha256": "5541a4dc04b1f831d606350a757944a269604ad2c5832b673e2ec31fefb6459c",
+      "size": 5305200,
+      "format_version": 1,
+      "record_count": 1439
+    },
+    {
+      "file": "gce-svsm-f6b450ad.igvm",
+      "object": "ovmf_x64_csm/svsm/f6b450adac3bc176032697e921093fbec4cefbe37d0135451f718dad2d1e21eb41c1da7aca1a80d7582fffe442f8940b.igvm",
+      "source_url": "https://storage.googleapis.com/gce_tcb_integrity/ovmf_x64_csm/svsm/f6b450adac3bc176032697e921093fbec4cefbe37d0135451f718dad2d1e21eb41c1da7aca1a80d7582fffe442f8940b.igvm",
+      "generation": "1793755410396920",
+      "time_created": "2026-11-04T01:23:30.453Z",
+      "md5_base64": "aJK6r1dQ60fQ+YYcgJaumw==",
+      "sha256": "02b75effc0cefe93a4b979d51e9823d829c00ff0c5bf069f2e1adfd329cb0df6",
+      "size": 5305200,
+      "format_version": 1,
+      "record_count": 1439
+    },
+    {
+      "file": "gce-svsm-4586baca.igvm",
+      "object": "ovmf_x64_csm/svsm/4586bacaaf1effc531b4c1dfc5e7945f4c216a91e897b1a029faa22e3bd0d880d6b302aaa6716ffc59980636a54371d8.igvm",
+      "source_url": "https://storage.googleapis.com/gce_tcb_integrity/ovmf_x64_csm/svsm/4586bacaaf1effc531b4c1dfc5e7945f4c216a91e897b1a029faa22e3bd0d880d6b302aaa6716ffc59980636a54371d8.igvm",
+      "generation": "1793817234729494",
+      "time_created": "2026-11-04T18:33:54.778Z",
+      "md5_base64": "Qq7LGYKkiu9p6ARGku6JJA==",
+      "sha256": "e5082bfacd04ee8e109b599500c28b58791dedacd8437dc50aad2cacb87678d9",
+      "size": 5313392,
+      "format_version": 1,
+      "record_count": 1439
+    },
+    {
+      "file": "gce-svsm-d5341027.igvm",
+      "object": "ovmf_x64_csm/svsm/d5341027d9eb3cfd8d4735d09b08830115199fed476acd7e1f3f9225e7d59f9c4ec1ae7bc1a3d2cf604a0b38a461ca72.igvm",
+      "source_url": "https://storage.googleapis.com/gce_tcb_integrity/ovmf_x64_csm/svsm/d5341027d9eb3cfd8d4735d09b08830115199fed476acd7e1f3f9225e7d59f9c4ec1ae7bc1a3d2cf604a0b38a461ca72.igvm",
+      "generation": "1794005807701009",
+      "time_created": "2026-11-06T22:56:47.757Z",
+      "md5_base64": "8lMb+P6oHbiEzD9qenxPlg==",
+      "sha256": "be8cb64fdcd7973c248a9fc5f33400e37ee017eed3bfc503b6604cb980de2b6a",
+      "size": 5305200,
+      "format_version": 1,
+      "record_count": 1439
+    }
+  ]
+}

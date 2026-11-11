@@ -28,6 +28,14 @@ cargo run -- diff \
   tests/fixtures/coconut-svsm/coconut-fedora-10828816.igvm
 ```
 
+Compare two Google Compute Engine SVSM releases published in `gs://gce_tcb_integrity/ovmf_x64_csm/svsm/`. The fixtures use the first eight hex digits of each object name; `tests/fixtures/gce-svsm/manifest.json` maps them back to the full object names. This pair changes only SEV-SNP pages above `0xffe00000`:
+
+```sh
+cargo run -- diff \
+  tests/fixtures/gce-svsm/gce-svsm-0932e060.igvm \
+  tests/fixtures/gce-svsm/gce-svsm-d5341027.igvm
+```
+
 Compare OpenHCL's standard and confidential-VM variants from the same build:
 
 ```sh

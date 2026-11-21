@@ -8,13 +8,55 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{Artifact, Error, MAX_FILE_SIZE, Record};
 
-const MAX_RECORDS: usize = 32_768;
-const MAX_REFERENCED_BYTES: u64 = 128 * 1024 * 1024;
+// Published SEV-SNP images with a kernel and initrd reach about 38,000 page records (147 MiB).
+const MAX_RECORDS: usize = 131_072;
+const MAX_REFERENCED_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) struct Image {
     pub artifact: Artifact,
     pub records: Vec<Record>,
     pub unreferenced_sha256: String,
+    pub pages: Vec<Page>,
+    pub platforms: BTreeMap<u32, &'static str>,
+    /// Records that contribute to a launch measurement, in file order.
+    pub directives: Vec<Directive>,
+    /// Launch measurements from the `igvm` crate's `measurement` module, per platform name:
+    /// lowercase hex digest, or the reason it could not be computed.
+    pub measurements: BTreeMap<&'static str, Result<String, String>>,
+}
+
+/// File offsets are already bounds-checked; 0 means no stored data.
+pub(crate) enum Directive {
+    Page {
+        gpa: u64,
+        mask: u32,
+        offset: u32,
+        data_type: u16,
+        unmeasured: bool,
+        shared: bool,
+    },
+    ParameterInsert {
+        gpa: u64,
+        mask: u32,
+    },
+    SnpVpContext {
+        gpa: u64,
+        mask: u32,
+        offset: u32,
+    },
+    SnpIdBlock {
+        mask: u32,
+        launch_digest: [u8; 48],
+    },
+}
+
+/// A 4 KiB page record; `offset` 0 means the page is zero-filled.
+pub(crate) struct Page {
+    pub gpa: u64,
+    pub mask: u32,
+    pub offset: u32,
+    pub unmeasured: bool,
+    pub shared: bool,
 }
 
 pub(crate) fn hash(bytes: &[u8]) -> String {
@@ -67,6 +109,8 @@ struct Reader<'a> {
     payload_ranges: Vec<(usize, usize)>,
     platforms: BTreeMap<u32, &'static str>,
     parameters: BTreeMap<u32, u64>,
+    pages: Vec<Page>,
+    directives: Vec<Directive>,
 }
 
 impl<'a> Reader<'a> {
@@ -76,7 +120,7 @@ impl<'a> Reader<'a> {
             .checked_add(size)
             .filter(|size| *size <= MAX_REFERENCED_BYTES)
             .ok_or(Error::Limit(
-                "more than 128 MiB of referenced or implicit payloads",
+                "more than 512 MiB of referenced or implicit payloads",
             ))?;
         if offset == 0 {
             return Ok(&[]);
@@ -275,6 +319,21 @@ impl<'a> Reader<'a> {
                 }
                 range(h.gpa, 4096)?;
                 let data = self.payload(h.file_offset, 4096)?;
+                self.pages.push(Page {
+                    gpa: h.gpa,
+                    mask: h.compatibility_mask,
+                    offset: h.file_offset,
+                    unmeasured: h.flags.unmeasured(),
+                    shared: h.flags.shared(),
+                });
+                self.directives.push(Directive::Page {
+                    gpa: h.gpa,
+                    mask: h.compatibility_mask,
+                    offset: h.file_offset,
+                    data_type: h.data_type.0,
+                    unmeasured: h.flags.unmeasured(),
+                    shared: h.flags.shared(),
+                });
                 (
                     "page_data",
                     Some(h.compatibility_mask),
@@ -309,6 +368,10 @@ impl<'a> Reader<'a> {
                     .get(&h.parameter_area_index)
                     .ok_or_else(|| invalid("parameter insert references an undefined area"))?;
                 range(h.gpa, *size)?;
+                self.directives.push(Directive::ParameterInsert {
+                    gpa: h.gpa,
+                    mask: h.compatibility_mask,
+                });
                 (
                     "parameter_insert",
                     Some(h.compatibility_mask),
@@ -349,6 +412,13 @@ impl<'a> Reader<'a> {
                 let mut fields = json!({
                     "gpa": address(gpa), "vp_index": h.vp_index, "payload_sha256": hash(data)
                 });
+                if platform == "sev-snp" {
+                    self.directives.push(Directive::SnpVpContext {
+                        gpa,
+                        mask: h.compatibility_mask,
+                        offset: h.file_offset,
+                    });
+                }
                 if matches!(platform, "sev-snp" | "sev-es") {
                     let vmsa: SevVmsa = read(data)?;
                     let features: u64 = vmsa.sev_features.into();
@@ -410,6 +480,10 @@ impl<'a> Reader<'a> {
             T::IGVM_VHT_SNP_ID_BLOCK => {
                 let h: IGVM_VHS_SNP_ID_BLOCK = read(body)?;
                 reserved(h.reserved != [0; 3])?;
+                self.directives.push(Directive::SnpIdBlock {
+                    mask: h.compatibility_mask,
+                    launch_digest: h.ld,
+                });
                 (
                     "snp_id_block",
                     Some(h.compatibility_mask),
@@ -513,9 +587,60 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Pages the VBS measurement may hash; bounds work the payload budget does not cover.
+const MAX_VBS_MEASURED_PAGES: u64 = 1 << 17;
+
+/// Checks a file before `igvm::measurement::generate_vbs_measurement`, which asserts that every
+/// page is NORMAL (igvm 0.5.0 `measurement/vbs.rs`) and hashes one page per 4 KiB of every
+/// error range, so untrusted files could otherwise crash the tool or make it run for hours.
+fn vbs_preflight(file: &IgvmFile, mask: u32) -> Result<(), String> {
+    use igvm::IgvmDirectiveHeader as D;
+    let mut areas = BTreeMap::new();
+    let mut pages: u64 = 0;
+    for directive in file.directives() {
+        match directive {
+            D::PageData {
+                compatibility_mask,
+                data_type,
+                ..
+            } if compatibility_mask & mask != 0 => {
+                if *data_type != IgvmPageDataType::NORMAL {
+                    return Err("vbs page data with a non-normal page type".into());
+                }
+                pages += 1;
+            }
+            D::ParameterArea {
+                number_of_bytes,
+                parameter_area_index,
+                ..
+            } => {
+                areas.insert(*parameter_area_index, *number_of_bytes);
+            }
+            D::ParameterInsert(param) if param.compatibility_mask & mask != 0 => {
+                let bytes = areas.get(&param.parameter_area_index).copied().unwrap_or(0);
+                pages = pages.saturating_add(bytes.div_ceil(4096));
+            }
+            D::ErrorRange {
+                compatibility_mask,
+                size_bytes,
+                ..
+            } if compatibility_mask & mask != 0 => {
+                pages = pages.saturating_add(u64::from(*size_bytes).div_ceil(4096));
+            }
+            _ => {}
+        }
+    }
+    if pages > MAX_VBS_MEASURED_PAGES {
+        return Err(format!(
+            "more than {MAX_VBS_MEASURED_PAGES} pages to measure for vbs"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn parse(bytes: &[u8]) -> Result<Image, Error> {
     if bytes.len() > MAX_FILE_SIZE {
-        return Err(Error::Limit("file is larger than 64 MiB"));
+        return Err(Error::Limit("file is larger than 256 MiB"));
     }
     if cfg!(target_endian = "big") {
         return Err(Error::Unsupported("big-endian hosts".into()));
@@ -559,13 +684,15 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Image, Error> {
         payload_ranges: Vec::new(),
         platforms: BTreeMap::new(),
         parameters: BTreeMap::new(),
+        pages: Vec::new(),
+        directives: Vec::new(),
     };
     let mut records = Vec::new();
     let mut cursor = start;
     // Bound allocations and payload offsets before passing untrusted bytes to igvm.
     while cursor < end {
         if records.len() == MAX_RECORDS {
-            return Err(Error::Limit("more than 32768 records"));
+            return Err(Error::Limit("more than 131072 records"));
         }
         let prefix_end = cursor
             .checked_add(8)
@@ -593,7 +720,30 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Image, Error> {
         );
         cursor = next;
     }
-    IgvmFile::new_from_binary(bytes, None)?;
+    let file = IgvmFile::new_from_binary(bytes, None)?;
+    let mut measurements = BTreeMap::new();
+    for (&mask, &name) in &reader.platforms {
+        let result = match name {
+            "sev-snp" => igvm::measurement::generate_snp_measurement(
+                file.initializations(),
+                file.directives(),
+                mask,
+            )
+            .map(|d| hex(&d)),
+            "tdx" => igvm::measurement::generate_tdx_measurement(file.directives(), mask)
+                .map(|d| hex(&d)),
+            "vbs" => match vbs_preflight(&file, mask) {
+                Err(reason) => {
+                    measurements.insert(name, Err(reason));
+                    continue;
+                }
+                Ok(()) => igvm::measurement::generate_vbs_measurement(file.directives(), mask)
+                    .map(|d| hex(&d)),
+            },
+            _ => continue,
+        };
+        measurements.insert(name, result.map_err(|error| error.to_string()));
+    }
     Ok(Image {
         artifact: Artifact {
             sha256: hash(bytes),
@@ -603,5 +753,9 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Image, Error> {
         },
         records,
         unreferenced_sha256: reader.unreferenced_hash(fixed_size, start),
+        pages: reader.pages,
+        platforms: reader.platforms,
+        directives: reader.directives,
+        measurements,
     })
 }

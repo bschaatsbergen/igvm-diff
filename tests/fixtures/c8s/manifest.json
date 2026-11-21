@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "retrieved_on": "2026-11-12",
+  "source": "ghcr.io/confidential-dot-ai/guests/worker (OCI artifact bundle, layer guest-smp2.igvm)",
+  "note": "Files are about 147 MiB each and not committed. Set IGVM_DIFF_C8S_DIR to a directory holding <tag>/guest-smp2.igvm to run tests/c8s.rs.",
+  "files": [
+    {
+      "file": "v0.99.1-sev-snp/guest-smp2.igvm",
+      "reference": "ghcr.io/confidential-dot-ai/guests/worker:v0.99.1-sev-snp",
+      "blob": "sha256:49be49594d57c69ecd74a35fe4b70280f086b4c2fc3545b927b814c03fd276e5",
+      "sha256": "49be49594d57c69ecd74a35fe4b70280f086b4c2fc3545b927b814c03fd276e5",
+      "size": 154062592,
+      "published_snp_launch_digest": "87bf9732b50ed2b459eec97920a68d764edd998a7b5b82ec7bb615af45c65dda33303bbca06200808fd1d070bd3bd081",
+      "published_vmsa_count": 2
+    },
+    {
+      "file": "v0.99.9-sev-snp/guest-smp2.igvm",
+      "reference": "ghcr.io/confidential-dot-ai/guests/worker:v0.99.9-sev-snp",
+      "blob": "sha256:39f2e28a63ef7a6ccfc6e716faddb58a58767c60a6385cee02b0d6adac6ad06f",
+      "sha256": "39f2e28a63ef7a6ccfc6e716faddb58a58767c60a6385cee02b0d6adac6ad06f",
+      "size": 154062592,
+      "published_snp_launch_digest": "e47c0ab3b044ae235ae9328e59f57a179236a65a698ab6137df72a81b78a9ed3b7507b490cec6fff44917c9099aa8f35",
+      "published_vmsa_count": 2
+    }
+  ]
+}

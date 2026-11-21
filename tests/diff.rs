@@ -56,7 +56,7 @@ fn identical_files_produce_an_empty_deterministic_report() {
     let b = diff(&bytes, &bytes).unwrap();
     assert!(!a.has_changes());
     assert!(a.findings.is_empty());
-    assert_eq!(a.measurement, "not_requested");
+    assert_eq!(a.measurement, "not_computed");
     assert!(!a.to_string().contains("References:"));
     assert!(
         a.to_string()
@@ -304,7 +304,7 @@ fn parameter_payload_and_placement_are_compared() {
     let text = report.to_string();
     assert!(text.contains("Boot configuration changed: boot parameters."));
     assert!(text.contains(
-        "Next: check the image builder's memory requirements and boot-parameter layout."
+        "Next: get the vendor's explanation for the changed memory requirements and boot-parameter layout."
     ));
 }
 
@@ -364,7 +364,7 @@ fn version_two_and_native_context_are_supported() {
     assert_eq!(report.findings[0].fields, ["payload_sha256"]);
     let text = report.to_string();
     assert!(text.contains("CPU state bytes changed outside the displayed register fields"));
-    assert!(text.contains("Next: review startup configuration"));
+    assert!(text.contains("Next: get the vendor's explanation for the changed CPU startup state"));
 }
 
 fn checksum(bytes: &mut [u8]) {
@@ -584,10 +584,10 @@ fn file_and_expanded_payload_limits_are_enforced() {
         diff(&oversized, &oversized)
             .unwrap_err()
             .to_string()
-            .contains("64 MiB")
+            .contains("256 MiB")
     );
     let mut directives = vec![page(0x1000, 1)];
-    for parameter_area_index in 0..5 {
+    for parameter_area_index in 0..17 {
         directives.push(D::ParameterArea {
             number_of_bytes: 32 * 1024 * 1024,
             parameter_area_index,
@@ -599,7 +599,7 @@ fn file_and_expanded_payload_limits_are_enforced() {
         diff(&bytes, &bytes)
             .unwrap_err()
             .to_string()
-            .contains("128 MiB")
+            .contains("512 MiB")
     );
 }
 
@@ -660,13 +660,11 @@ fn cli_formats_alias_and_exit_codes() {
             assert!(output.stderr.is_empty());
         } else {
             let text = String::from_utf8(output.stdout).unwrap();
-            assert!(text.contains("Contents changed in 1 memory page (4 KiB each)."));
-            assert!(text.contains(
-                "No changes found to page addresses, page attributes or boot-setting records."
-            ));
-            assert!(text.contains(
-                "Next: identify the changed component using the build's symbols/linker map"
-            ));
+            assert!(text.contains("Measured page data changed: 1 page [sev-snp]."));
+            assert!(text.contains("Changed pages (4 KiB): 1 modified"));
+            assert!(
+                text.contains("Next: ask the vendor which component the changed pages belong to")
+            );
             assert!(text.contains("0x1000..0x2000"));
             assert!(text.contains("contents changed"));
             assert!(!text.contains("payload_sha256"));
@@ -741,7 +739,7 @@ fn snp_identity_metadata_and_key_material_changes_are_visible() {
         report.findings[0].fields,
         ["guest_svn", "id_public_key_sha256"]
     );
-    assert_eq!(report.measurement, "not_requested");
+    assert_eq!(report.measurement, "not_computed");
     assert!(report.to_string().contains(
         "Next: verify the changed identity/measurement metadata against your trust policy."
     ));
@@ -873,10 +871,10 @@ fn record_count_is_bounded_even_when_payloads_alias() {
     let body = body_offset(&base, IgvmVariableHeaderType::IGVM_VHT_PAGE_DATA);
     let platform_end = body - 8;
     let mut record = base[platform_end..platform_end + 32].to_vec();
-    let data_start = platform_end + 32 * 32_768;
+    let data_start = platform_end + 32 * 131_072;
     record[20..24].copy_from_slice(&(data_start as u32).to_le_bytes());
     let mut bytes = base[..platform_end].to_vec();
-    for _ in 0..32_768 {
+    for _ in 0..131_072 {
         bytes.extend_from_slice(&record);
     }
     bytes.extend_from_slice(&[1; 4096]);
@@ -888,7 +886,7 @@ fn record_count_is_bounded_even_when_payloads_alias() {
         diff(&bytes, &bytes)
             .unwrap_err()
             .to_string()
-            .contains("32768 records")
+            .contains("131072 records")
     );
 }
 
@@ -954,7 +952,8 @@ fn public_coconut_images_match_the_manifest_and_can_be_compared() {
             let summary = report.to_string();
             assert!(summary.lines().count() < 110);
             assert!(summary.contains("Configuration and CPU changes:"));
-            assert!(summary.contains("more ranges; use --verbose"));
+            assert!(summary.contains("Changed pages (4 KiB): "));
+            assert!(format!("{report:#}").contains("Changed guest-memory ranges"));
             assert!(format!("{report:#}").lines().count() > report.findings.len());
             let reverse = diff(after, before).unwrap();
             let mut expected: Vec<_> = report
@@ -1017,18 +1016,26 @@ fn coconut_fedora_cli_prioritizes_startup_and_layout_changes() {
         "Files differ: 2289 record changes",
         "Boot configuration changed: CPU startup state, boot parameters, memory requirements, platform settings.",
         "Memory pages changed: addresses or platform coverage, contents, storage.",
-        "Next: review startup configuration and memory layout in the image builder's source/build diff.",
+        "Next: get the vendor's explanation for the changed CPU startup state and platform settings, then check them against your attestation policy.",
         "Entry point (RIP): 0x808000 -> 0x10002",
         "no-execute (NXE) enabled [1]",
         "debug-register virtualization (DebugVirtualization) enabled [2]",
-        "Memory pages (4 KiB each): 1400 added, 646 removed, 233 modified",
-        "... 24 more ranges; use --verbose",
-        "Launch measurement: not computed",
+        "Changed pages (4 KiB): 1400 added, 646 removed, 233 modified",
+        "0xffe20000..0xfffcc000: UEFI firmware volume (before only) [native, sev-snp], 212 pages",
+        "0xffc84000..0xfffcc000: UEFI firmware volume (after only) [native, sev-snp], 594 pages",
+        "Firmware modules [native, sev-snp]: 101 modified, 5 added, 4 unchanged",
+        "  added PEI (1): MemDebugLogPei\n  added DXE (3): EmmcDxe, SdDxe, SdMmcPciHcDxe\n  added UEFI applications (1): BootManagerMenuApp\n",
+        "  SEC (2): SecMain, Volume Top File (reset vector)\n",
+        "Attestation impact:\n  Launch measurement changes [sev-snp, tdx] (from the computed digests below).\n  Measured page data changed: 2268 pages [sev-snp], 1529 pages [tdx].\n  CPU startup state (VP context) changed [sev-snp].\n",
+        "  sev-snp launch digest, igvm crate:\n    before: 75c8f9424b35fec0927b34c69be3a7cc5df89b3c4c1b4e0f01f99a182bab6b864900927bbf5ef79652c430db4e591e7f\n    after:  5c42291467749a45cceb16eb817e9102942542d21841434735752f057d5d4812f2a1b10bff75847d0f35d5a74446e30c\n",
+        "  tdx MRTD, igvm crate:\n    before: f86375b701b9b076c2727509ed48a49d18f0d74c4cec788c0a3a0d4777aea15c9e865b2404d6cd239b2031118b8f3604\n",
     ] {
         assert!(text.contains(expected), "missing: {expected}\n{text}");
     }
     assert!(text.find("Next:").unwrap() < text.find("Configuration and CPU changes:").unwrap());
-    assert!(text.lines().count() < 80);
+    // Default output stays short; page ranges and every module name are under --verbose.
+    // Worst case in the fixtures (full rebuild with a firmware relayout); GCE updates stay < 40.
+    assert!(text.lines().count() < 90, "{}", text.lines().count());
 }
 
 #[test]
@@ -1048,8 +1055,9 @@ fn summary_groups_only_adjacent_pages_with_matching_attributes() {
     assert!(text.contains("Page attribute changes: 2"));
     assert!(text.contains("Shared: false -> true"));
     assert!(text.contains("Unmeasured: false -> true"));
-    assert!(text.contains("Records involving shared pages: 1"));
-    assert!(text.contains("Records involving unmeasured pages: 1"));
+    let verbose = format!("{report:#}");
+    assert!(verbose.contains("Records involving shared pages: 1"));
+    assert!(verbose.contains("Records involving unmeasured pages: 1"));
     assert!(text.contains("0x1000..0x3000: 2 pages"));
     for (start, end) in [(0x4000, 0x5000), (0x5000, 0x6000), (0x6000, 0x7000)] {
         assert!(text.contains(&format!("{start:#x}..{end:#x}: 1 page,")));
@@ -1086,7 +1094,7 @@ fn page_flags_remain_visible_among_many_mask_reassignments() {
     let report = diff(&make(1, false), &make(2, true)).unwrap();
     let text = report.to_string();
     assert!(text.contains("Unmeasured: false -> true"));
-    assert!(text.contains("8 more changes; use --verbose"));
+    assert!(text.contains("14 more changes; use --verbose"));
     assert_eq!(report.findings.len(), 21);
 }
 
@@ -1158,7 +1166,10 @@ fn summary_keeps_policy_cpu_order_and_unexplained_bytes_visible() {
     assert!(text.contains("Entry point (RIP): 0x1000 -> 0x2000"));
     assert!(text.contains("Relative record order changed"));
     assert!(text.contains("2 reordered"));
-    assert!(text.contains("Launch measurement: not computed"));
+    assert!(
+        text.contains("  sev-snp launch digest, igvm crate:\n    before: "),
+        "{text}"
+    );
 
     let before = fixture(vec![page(0x1000, 1)]);
     let mut after = before.clone();
@@ -1203,7 +1214,8 @@ fn summary_decodes_cpu_flags_and_deduplicates_references() {
     assert!(text.contains("SEV features: 0x9 -> 0x29"));
     assert_eq!(text.matches("https://").count(), 2);
     assert_eq!(text.matches("References:").count(), 1);
-    assert!(!format!("{report:#}").contains("References:"));
+    // --verbose repeats the summary, references included, before the record dump.
+    assert_eq!(format!("{report:#}").matches("References:").count(), 1);
 
     let text = diff(&after, &before).unwrap().to_string();
     assert!(text.contains("no-execute (NXE) disabled [1]"));
@@ -1262,7 +1274,7 @@ fn review_guidance_distinguishes_storage_layout_masks_and_ambiguity() {
             unchanged.clone(),
             fixture(vec![page(0x2000, 1)]),
             "Memory pages changed: addresses or platform coverage.",
-            "Next: check the build's memory layout",
+            "Next: check which platforms load the added/removed pages",
         ),
         (
             "content and mask",
@@ -1283,7 +1295,7 @@ fn review_guidance_distinguishes_storage_layout_masks_and_ambiguity() {
             fixture(vec![page(0x1000, 1), page(0x2000, 2)]),
             fixture(vec![page(0x2000, 2), page(0x1000, 1)]),
             "Boot configuration changed: record loading order.",
-            "Next: review the loader/build changes",
+            "Next: ask the vendor why the record order changed",
         ),
         (
             "duplicates",
@@ -1312,7 +1324,7 @@ fn review_guidance_distinguishes_storage_layout_masks_and_ambiguity() {
                 vec![page(0x1000, 1)],
             ),
             "Boot configuration changed: IGVM format.",
-            "Next: review the image-format change",
+            "Next: check that your loader and tooling support the new IGVM format",
         ),
     ];
     for (name, before, after, meaning, next) in cases {
@@ -1352,6 +1364,6 @@ fn startup_changes_stay_visible_when_parameter_changes_are_truncated() {
         .unwrap()
         .to_string();
     assert!(text.contains("Entry point (RIP): 0x1000 -> 0x2000"));
-    assert!(text.contains("2 more changes; use --verbose"));
+    assert!(text.contains("8 more changes; use --verbose"));
     assert!(text.contains("CPU startup state, boot parameters"));
 }

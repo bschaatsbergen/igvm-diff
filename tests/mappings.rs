@@ -381,7 +381,7 @@ fn corim_documents_and_signatures_are_compared_as_opaque_bytes() {
             json!({"size": size, "payload_sha256": hash(&payload)})
         );
         assert!(report.to_string().contains("identity/measurement metadata"));
-        assert_eq!(report.measurement, "not_requested");
+        assert_eq!(report.measurement, "not_computed");
         assert!(report.diagnostics.is_empty());
     }
 }
@@ -824,7 +824,7 @@ fn snp_identity_fields_and_each_key_or_signature_use_the_correct_bytes() {
             "author_key_signature_sha256": hash(&[0x66; 144]), "author_public_key_sha256": hash(&[0x77; 152]),
         })
     );
-    assert_eq!(report.measurement, "not_requested");
+    assert_eq!(report.measurement, "not_computed");
 }
 
 #[test]
@@ -855,5 +855,5 @@ fn vbs_measurement_fields_keep_digests_signatures_and_keys_separate() {
             "boot_measurement_digest": "11".repeat(64), "signature_sha256": hash(&[0x22; 256]), "public_key_sha256": hash(&[0x33; 512]),
         })
     );
-    assert_eq!(report.measurement, "not_requested");
+    assert_eq!(report.measurement, "computed");
 }

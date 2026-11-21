@@ -144,8 +144,55 @@ fn openhcl_configuration_and_endorsement_changes_are_localized() {
                 assert_eq!(change.fields, fields);
                 assert!(!report.to_string().contains("Contents changed in"));
                 assert!(report.diagnostics.is_empty());
-                assert_eq!(report.measurement, "not_requested");
+                assert_eq!(report.measurement, "computed");
             }
         }
     }
+}
+
+/// The igvm crate's launch measurements must reproduce the reference values the OpenHCL build
+/// published next to its CVM image (SNP launch digest, TDX MRTD and VBS boot digest), and the
+/// SNP ID block's launch digest.
+#[test]
+fn computed_launch_measurements_reproduce_the_published_openhcl_references() {
+    let (directory, _) = fixtures();
+    let base = directory.join("38639549342/x64-openhcl-igvm-cvm");
+    let bytes = fs::read(base.join("openhcl-x64-cvm.bin")).unwrap();
+    let reference = |file: &str, key: &str| -> String {
+        let json: Value = serde_json::from_slice(&fs::read(base.join(file)).unwrap()).unwrap();
+        json["series"][0]["reference"][key]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+    };
+    let report = diff(&bytes, &bytes).unwrap();
+    assert_eq!(report.measurement, "computed");
+    let measured = report
+        .launch_measurement
+        .as_ref()
+        .unwrap()
+        .before
+        .igvm
+        .clone();
+    assert_eq!(
+        measured["sev-snp"].as_ref().unwrap(),
+        &reference("openhcl-snp.json", "snp_ld")
+    );
+    assert_eq!(
+        measured["tdx"].as_ref().unwrap(),
+        &reference("openhcl-tdx.json", "tdx_mrtd")
+    );
+    assert_eq!(
+        measured["vbs"].as_ref().unwrap(),
+        &reference("openhcl-vbs.json", "vbs_boot_digest")
+    );
+    let text = report.to_string();
+    assert!(
+        text.contains(
+            "  SNP ID block launch digest (before and after): matches the igvm crate value.\n"
+        ),
+        "{text}"
+    );
+    // The ID block confirms the igvm crate's convention, so alternatives are not shown.
+    assert!(!text.contains("igvmmeasure"), "{text}");
 }

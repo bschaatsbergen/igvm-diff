@@ -1,9 +1,12 @@
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::image::Image;
+use crate::{content::Content, image::Image};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Artifact {
@@ -72,6 +75,104 @@ pub struct Comparison {
     pub order_changed: bool,
 }
 
+/// A group of non-page records whose change can matter for attestation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Area {
+    VpContext,
+    GuestPolicy,
+    IdentityRecords,
+    PlatformDefinitions,
+    BootParameters,
+}
+
+impl Area {
+    pub const ALL: [Area; 5] = [
+        Area::VpContext,
+        Area::GuestPolicy,
+        Area::IdentityRecords,
+        Area::PlatformDefinitions,
+        Area::BootParameters,
+    ];
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChangedArea {
+    pub area: Area,
+    /// Affected isolation platforms; empty for records without a compatibility mask.
+    pub platforms: Vec<String>,
+}
+
+/// What the change means for remote attestation, derived only from the IGVM page data flags:
+/// `unmeasured` pages are imported unmeasured and `shared` pages are not part of the launch
+/// measurement. Platforms without a launch measurement (`native`) are left out.
+#[derive(Debug, Serialize)]
+pub struct Attestation {
+    /// Changed page records that are measured in at least one of the two files, per platform.
+    pub measured_page_changes: BTreeMap<String, usize>,
+    /// Changed page records that are unmeasured or shared in both files, per platform.
+    pub unmeasured_page_changes: BTreeMap<String, usize>,
+    pub changed: Vec<ChangedArea>,
+}
+
+fn attestation(findings: &[Change]) -> Option<Attestation> {
+    let mut impact = Attestation {
+        measured_page_changes: BTreeMap::new(),
+        unmeasured_page_changes: BTreeMap::new(),
+        changed: Vec::new(),
+    };
+    let mut areas = BTreeMap::<Area, BTreeSet<String>>::new();
+    let mut any = false;
+    for change in findings {
+        let records: Vec<&Record> = change.before.iter().chain(&change.after).collect();
+        let platforms: BTreeSet<&String> = records
+            .iter()
+            .flat_map(|r| &r.platforms)
+            .filter(|p| p.as_str() != "native")
+            .collect();
+        if records.iter().any(|r| !r.platforms.is_empty()) && platforms.is_empty() {
+            continue;
+        }
+        any = true;
+        let kind = records[0].kind;
+        if kind == "page_data" {
+            let measured = records
+                .iter()
+                .any(|r| r.fields["unmeasured"] != true && r.fields["shared"] != true);
+            let target = if measured {
+                &mut impact.measured_page_changes
+            } else {
+                &mut impact.unmeasured_page_changes
+            };
+            for platform in platforms {
+                *target.entry(platform.clone()).or_default() += 1;
+            }
+            continue;
+        }
+        let area = match kind {
+            "vp_context" => Area::VpContext,
+            "guest_policy" => Area::GuestPolicy,
+            "snp_id_block" | "vbs_measurement" | "corim_document" | "corim_signature" => {
+                Area::IdentityRecords
+            }
+            "supported_platform" => Area::PlatformDefinitions,
+            _ => Area::BootParameters,
+        };
+        areas
+            .entry(area)
+            .or_default()
+            .extend(platforms.into_iter().cloned());
+    }
+    impact.changed = areas
+        .into_iter()
+        .map(|(area, platforms)| ChangedArea {
+            area,
+            platforms: platforms.into_iter().collect(),
+        })
+        .collect();
+    any.then_some(impact)
+}
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub schema_version: u32,
@@ -80,13 +181,76 @@ pub struct Report {
     pub inputs: Inputs,
     pub comparison: Comparison,
     pub findings: Vec<Change>,
+    /// Absent when no isolation platform is affected.
+    pub attestation: Option<Attestation>,
+    /// Payloads that contain changed page contents, per platform.
+    pub content: Content,
+    /// `computed` when `launch_measurement` holds launch digests, otherwise `not_computed`.
     pub measurement: &'static str,
+    pub launch_measurement: Option<crate::LaunchMeasurement>,
     pub diagnostics: Vec<String>,
+    /// Platforms defined in either file.
+    pub platforms: BTreeSet<String>,
+    /// The platform the report is restricted to, if any (`--platform`).
+    pub focus: Option<String>,
 }
 
 impl Report {
     pub fn has_changes(&self) -> bool {
         self.comparison.file_bytes_changed
+    }
+
+    /// Restricts the report to one platform: findings for other platforms, their payload and
+    /// module analysis, and their launch measurements are removed. Records that apply to every
+    /// platform (no compatibility mask) are kept. File-level facts (hashes, `has_changes`) stay.
+    pub fn focus(&mut self, platform: &str) {
+        let keep = |platforms: &mut Vec<String>| {
+            if platforms.is_empty() {
+                return true;
+            }
+            let selected = platforms.iter().any(|p| p == platform);
+            platforms.retain(|p| p == platform);
+            selected
+        };
+        self.findings.retain_mut(|change| {
+            let mut kept = false;
+            for record in change.before.iter_mut().chain(change.after.iter_mut()) {
+                kept |= keep(&mut record.platforms);
+            }
+            kept
+        });
+        self.comparison.changed_records = self.findings.len();
+        self.attestation = attestation(&self.findings);
+        self.content
+            .components
+            .retain_mut(|c| keep(&mut c.platforms) && !c.platforms.is_empty());
+        self.content
+            .firmware
+            .retain_mut(|c| keep(&mut c.platforms) && !c.platforms.is_empty());
+        self.content
+            .unidentified
+            .retain_mut(|c| keep(&mut c.platforms) && !c.platforms.is_empty());
+        self.content
+            .notes
+            .retain(|note| note.starts_with(&format!("{platform}:")));
+        if let Some(launch) = &mut self.launch_measurement {
+            for side in [&mut launch.before, &mut launch.after] {
+                side.igvm.retain(|name, _| name == platform);
+                if platform != "sev-snp" {
+                    side.igvmmeasure = None;
+                }
+            }
+            let sides = [&launch.before, &launch.after];
+            self.measurement = if sides.iter().any(|f| f.igvm.values().any(Result::is_ok)) {
+                "computed"
+            } else {
+                "not_computed"
+            };
+            if sides.iter().all(|f| f.igvm.is_empty()) {
+                self.launch_measurement = None;
+            }
+        }
+        self.focus = Some(platform.to_string());
     }
 }
 
@@ -195,7 +359,7 @@ pub(crate) fn compare(before: Image, after: Image) -> Report {
         diagnostics.push("File bytes differ without supported record changes. File offsets, padding, or unreferenced data may differ; this does not establish semantic equivalence.".into());
     }
     Report {
-        schema_version: 1,
+        schema_version: 2,
         tool: Tool {
             version: env!("CARGO_PKG_VERSION"),
             parser: "igvm 0.5.0",
@@ -211,8 +375,18 @@ pub(crate) fn compare(before: Image, after: Image) -> Report {
             changed_records: findings.len(),
             order_changed,
         },
+        attestation: attestation(&findings),
         findings,
-        measurement: "not_requested",
+        content: Content::default(),
+        measurement: "not_computed",
+        launch_measurement: None,
+        platforms: before
+            .platforms
+            .values()
+            .chain(after.platforms.values())
+            .map(|p| p.to_string())
+            .collect(),
+        focus: None,
         diagnostics,
     }
 }
@@ -220,38 +394,11 @@ pub(crate) fn compare(before: Image, after: Image) -> Report {
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
-            return crate::text::summary(self, f);
+            return crate::text::summary(self, f, false);
         }
-        writeln!(
-            f,
-            "{}",
-            if self.has_changes() {
-                "Files differ"
-            } else {
-                "Files are identical"
-            }
-        )?;
-        writeln!(
-            f,
-            "Before: {} ({} bytes, {} records)",
-            self.inputs.before.sha256, self.inputs.before.size, self.inputs.before.record_count
-        )?;
-        writeln!(
-            f,
-            "After:  {} ({} bytes, {} records)",
-            self.inputs.after.sha256, self.inputs.after.size, self.inputs.after.record_count
-        )?;
-        writeln!(
-            f,
-            "Changed records: {}; measurement not requested",
-            self.findings.len()
-        )?;
-        if self.comparison.format_changed {
-            writeln!(
-                f,
-                "Format version: {} -> {}",
-                self.inputs.before.format_version, self.inputs.after.format_version
-            )?;
+        crate::text::summary(self, f, true)?;
+        if !self.findings.is_empty() {
+            writeln!(f, "\nEvery record change (record index before -> after):")?;
         }
         for change in &self.findings {
             let record = change
@@ -293,9 +440,6 @@ impl fmt::Display for Report {
                 }
                 _ => writeln!(f, "    {}", record.fields)?,
             }
-        }
-        for diagnostic in &self.diagnostics {
-            writeln!(f, "Note: {diagnostic}")?;
         }
         Ok(())
     }

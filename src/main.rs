@@ -6,7 +6,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
-use igvm_diff::{MAX_FILE_SIZE, diff};
+use igvm_diff::{MAX_FILE_SIZE, diff_platform};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -27,6 +27,9 @@ enum Command {
         /// Show every record change and full hashes in text output.
         #[arg(short, long)]
         verbose: bool,
+        /// Only report on one platform defined in the files, for example sev-snp, tdx or vbs.
+        #[arg(short, long)]
+        platform: Option<String>,
     },
 }
 
@@ -42,7 +45,7 @@ fn read_file(path: &Path) -> Result<Vec<u8>, String> {
         .and_then(|file| file.take(MAX_FILE_SIZE as u64 + 1).read_to_end(&mut bytes))
         .map_err(|error| format!("{}: {error}", path.display()))?;
     if bytes.len() > MAX_FILE_SIZE {
-        return Err(format!("{}: file is larger than 64 MiB", path.display()));
+        return Err(format!("{}: file is larger than 256 MiB", path.display()));
     }
     Ok(bytes)
 }
@@ -53,10 +56,12 @@ fn run(args: Args) -> Result<ExitCode, String> {
         after,
         format,
         verbose,
+        platform,
     } = args.command;
     let before = read_file(&before)?;
     let after = read_file(&after)?;
-    let report = diff(&before, &after).map_err(|error| error.to_string())?;
+    let report =
+        diff_platform(&before, &after, platform.as_deref()).map_err(|error| error.to_string())?;
     let mut out = io::BufWriter::new(io::stdout().lock());
     match format {
         Format::Text => {
